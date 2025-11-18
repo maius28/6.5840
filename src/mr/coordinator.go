@@ -17,15 +17,19 @@ type Coordinator struct {
 
 	TaskProcessingmMap map[int]*Task
 
-	FinishedMapChan chan int
+	FinishedTaskChan chan TaskType
 
-	TotalMapTask int
+	MapTotal int
 
-	AllMapFinished bool //all task count
+	Total int
 
-	Finished bool // finished task count
+	AllMapFinished bool
+
+	AllTaskFinished bool
 
 	Timeout time.Duration
+
+	nReduct int
 }
 
 type TaskType int
@@ -47,24 +51,53 @@ type Task struct {
 
 // Your code here -- RPC handlers for the worker to call.
 func (c *Coordinator) RegisterTask(args *TaskArgs, reply *TaskReply) error {
-	//first get idle map task
 	select {
+	//first get idle map task
 	case task, ok := <-c.idleMapChan:
 		if !ok {
 			return fmt.Errorf("error: idleMap chan closed")
 		}
+		reply.Id = task.Id
 		reply.TaskType = task.TaskType
 		reply.FileName = task.FileName
+		reply.nReduce = c.nReduct
 		task.StartTime = time.Now()
 		c.TaskProcessingmMap[task.Id] = task
 		return nil
+
 	default:
+		if c.AllMapFinished {
+			select {
+			case task, ok := <-c.idleReduceTaskChan: //if exist reduce task
+				if !ok {
+					return fmt.Errorf("error: idleReduce chan closed")
+				}
+				reply.Id = task.Id
+				reply.TaskType = task.TaskType
+				reply.ReduceId = task.ReduceId
+
+				task.StartTime = time.Now()
+				c.TaskProcessingmMap[task.Id] = task
+				return nil
+			default:
+				if c.AllTaskFinished {
+					reply.TaskType = Exit
+					return nil
+				}
+			}
+
+		}
+
+		reply.TaskType = Wait
+		return nil
 	}
+}
 
-	//if no idle map task, check all map task finished, if all finished, assgin reduce task
-
-	//
-
+func (c *Coordinator) AckTask(args *TaskArgs, reply *TaskReply) error {
+	task := c.TaskProcessingmMap[args.Id]
+	delete(c.TaskProcessingmMap, args.Id)
+	c.FinishedTaskChan <- task.TaskType
+	return nil
 }
 
 // an example RPC handler.
@@ -95,6 +128,11 @@ func (c *Coordinator) Done() bool {
 	ret := false
 
 	// Your code here.
+	if c.AllTaskFinished {
+		ret = true
+		close(c.idleMapChan)
+		close(c.idleReduceTaskChan)
+	}
 
 	return ret
 }
@@ -116,16 +154,25 @@ func (c *Coordinator) timeoutCheck() {
 	}
 }
 
-func (c *Coordinator) allMapFinishedCheck() {
-	finishedCount := 0
-	for finishedCount < c.TotalMapTask {
-		<-c.FinishedMapChan
-		finishedCount++
+func (c *Coordinator) finishTaskCount() {
+	mapCount := 0
+	count := 0
+	for count < c.Total {
+		taskType := <-c.FinishedTaskChan
+		if taskType == Map {
+			mapCount++
+			if mapCount == c.MapTotal {
+				c.AllMapFinished = true
+			}
+		}
+
+		count++
 	}
 
-	close(c.FinishedMapChan)
+	c.AllTaskFinished = true
+
+	close(c.FinishedTaskChan)
 	fmt.Println("all map task finished")
-	return
 }
 
 // create a Coordinator.
@@ -139,8 +186,12 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	// Your code here.
 	c.idleMapChan = make(chan *Task, mapCount)
 	c.idleReduceTaskChan = make(chan *Task, nReduce)
-	c.FinishedMapChan = make(chan int)
-	c.TotalMapTask = len(files)
+	c.FinishedTaskChan = make(chan TaskType, c.Total)
+	c.MapTotal = len(files)
+	c.Total = c.MapTotal + nReduce
+	c.AllMapFinished = false
+	c.AllTaskFinished = false
+	c.nReduct = nReduce
 
 	for i, file := range files {
 		c.idleMapChan <- &Task{
@@ -164,7 +215,7 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 
 	c.server()
 
-	go c.allMapFinishedCheck()
+	go c.finishTaskCount()
 	go c.timeoutCheck()
 
 	return &c

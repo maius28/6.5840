@@ -26,12 +26,16 @@ type ExampleReply struct {
 
 // Add your RPC definitions here.
 type TaskArgs struct {
+	TaskType TaskType
+	Id       int
 }
 
 type TaskReply struct {
+	Id       int
 	TaskType TaskType
 	FileName string
 	ReduceId int
+	nReduce  int
 }
 
 // Cook up a unique-ish UNIX-domain socket name
