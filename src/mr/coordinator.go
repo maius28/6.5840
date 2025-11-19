@@ -29,7 +29,7 @@ type Coordinator struct {
 
 	Timeout time.Duration
 
-	nReduct int
+	NReduce int
 }
 
 type TaskType int
@@ -60,7 +60,7 @@ func (c *Coordinator) RegisterTask(args *TaskArgs, reply *TaskReply) error {
 		reply.Id = task.Id
 		reply.TaskType = task.TaskType
 		reply.FileName = task.FileName
-		reply.nReduce = c.nReduct
+		reply.NReduce = c.NReduce
 		task.StartTime = time.Now()
 		c.TaskProcessingmMap[task.Id] = task
 		return nil
@@ -94,9 +94,11 @@ func (c *Coordinator) RegisterTask(args *TaskArgs, reply *TaskReply) error {
 }
 
 func (c *Coordinator) AckTask(args *TaskArgs, reply *TaskReply) error {
+	fmt.Printf("ack task:%v \n", args)
 	task := c.TaskProcessingmMap[args.Id]
 	delete(c.TaskProcessingmMap, args.Id)
 	c.FinishedTaskChan <- task.TaskType
+	fmt.Printf("finish ack task:%v \n", args)
 	return nil
 }
 
@@ -172,7 +174,7 @@ func (c *Coordinator) finishTaskCount() {
 	c.AllTaskFinished = true
 
 	close(c.FinishedTaskChan)
-	fmt.Println("all map task finished")
+	fmt.Println("all task finished")
 }
 
 // create a Coordinator.
@@ -191,7 +193,7 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	c.Total = c.MapTotal + nReduce
 	c.AllMapFinished = false
 	c.AllTaskFinished = false
-	c.nReduct = nReduce
+	c.NReduce = nReduce
 
 	for i, file := range files {
 		c.idleMapChan <- &Task{

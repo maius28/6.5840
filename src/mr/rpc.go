@@ -35,7 +35,7 @@ type TaskReply struct {
 	TaskType TaskType
 	FileName string
 	ReduceId int
-	nReduce  int
+	NReduce  int
 }
 
 // Cook up a unique-ish UNIX-domain socket name

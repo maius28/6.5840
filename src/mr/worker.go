@@ -8,6 +8,9 @@ import (
 	"log"
 	"net/rpc"
 	"os"
+	"path/filepath"
+	"sort"
+	"strconv"
 	"time"
 )
 
@@ -25,29 +28,49 @@ func ihash(key string) int {
 	return int(h.Sum32() & 0x7fffffff)
 }
 
+// for sorting by key.
+type ByKey []KeyValue
+
+// for sorting by key.
+func (a ByKey) Len() int           { return len(a) }
+func (a ByKey) Swap(i, j int)      { a[i], a[j] = a[j], a[i] }
+func (a ByKey) Less(i, j int) bool { return a[i].Key < a[j].Key }
+
 // main/mrworker.go calls this function.
 func Worker(mapf func(string, string) []KeyValue,
 	reducef func(string, []string) string) {
 	// Your worker implementation here.
 
-	for {
-		taskArgs, err := doWork(mapf, reducef)
-		if err != nil {
-			fmt.Printf("do work error: %v \n", err)
-			//todo
-		}
+	args := TaskArgs{}
+	reply := TaskReply{}
 
-		if taskArgs.TaskType == Wait {
-			fmt.Println("no idle task, wait 2 second")
-			time.Sleep(2 * time.Second)
-			continue
-		} else if taskArgs.TaskType == Exit {
-			fmt.Println("get exit sign, exit process")
-			return
-		} else {
-			err = doAck(taskArgs)
-			if err != nil {
-				fmt.Printf("%v \n", err)
+	for {
+		fmt.Println("ask task")
+		ok := call("Coordinator.RegisterTask", &args, &reply)
+		var err error = nil
+		if ok {
+			//map
+			switch reply.TaskType {
+			case Map:
+				err = doMap(&reply, mapf)
+			case Reduce:
+				err = doReduce(&reply, reducef)
+			case Wait:
+				fmt.Println("no idle task, wait 2 second")
+				time.Sleep(2 * time.Second)
+				continue
+			case Exit:
+				fmt.Println("get exit sign, exit process")
+				return
+			default:
+				err = fmt.Errorf("non avaliable taskType %v", reply.TaskType)
+			}
+
+			if err == nil {
+				err = doAck(TaskArgs{Id: reply.Id, TaskType: reply.TaskType})
+				if err != nil {
+					fmt.Printf("%v \n", err)
+				}
 			}
 		}
 	}
@@ -55,31 +78,6 @@ func Worker(mapf func(string, string) []KeyValue,
 	// uncomment to send the Example RPC to the coordinator.
 	// CallExample()
 
-}
-
-func doWork(mapf func(string, string) []KeyValue,
-	reducef func(string, []string) string) (TaskArgs, error) {
-	args := TaskArgs{}
-	reply := TaskReply{}
-
-	ok := call("Coordinator.RegisterTask", &args, &reply)
-	if ok {
-		//map
-		switch reply.TaskType {
-		case Map:
-			doMap(&reply, mapf)
-		case Reduce:
-			doReduce(&reply, reducef)
-		case Wait:
-
-		case Exit:
-
-		default:
-
-		}
-
-	}
-	return TaskArgs{Id: reply.Id, TaskType: reply.TaskType}, nil
 }
 
 func doAck(args TaskArgs) error {
@@ -111,7 +109,7 @@ func doMap(reply *TaskReply, mapf func(string, string) []KeyValue) error {
 	partitionMap := make(map[int][]KeyValue)
 
 	for _, kv := range kva {
-		partition := ihash(kv.Key) % reply.nReduce
+		partition := ihash(kv.Key) % reply.NReduce
 		partitionMap[partition] = append(partitionMap[partition], kv)
 	}
 
@@ -138,9 +136,71 @@ func doMap(reply *TaskReply, mapf func(string, string) []KeyValue) error {
 	return nil
 }
 
-func doReduce(reply *TaskReply, reducef func(string, []string) string) (TaskArgs, error) {
+func doReduce(reply *TaskReply, reducef func(string, []string) string) error {
+	partition := reply.ReduceId
+	match := os.TempDir() + "map-*-" + strconv.Itoa(partition)
+	filepaths, err := filepath.Glob(match)
+	if err != nil {
+		return fmt.Errorf("%v", err)
+	}
 
-	return TaskArgs{Id: reply.Id, TaskType: reply.TaskType}, nil
+	if len(filepaths) == 0 {
+		return fmt.Errorf("no match files: %v", match)
+	}
+
+	intermediate := []KeyValue{}
+
+	for _, filepath := range filepaths {
+		file, err := os.Open(filepath)
+		if err != nil {
+			return fmt.Errorf("%v", err)
+		}
+
+		dec := json.NewDecoder(file)
+		for {
+			var kv KeyValue
+			if err := dec.Decode(&kv); err != nil {
+				break
+			}
+			intermediate = append(intermediate, kv)
+		}
+
+		err = os.Remove(filepath)
+		if err != nil {
+			fmt.Printf("remove file err: %v \n", err)
+		}
+	}
+
+	sort.Sort(ByKey(intermediate))
+
+	oname := "mr-out-" + strconv.Itoa(partition)
+	ofile, _ := os.Create(oname)
+
+	//
+	// call Reduce on each distinct key in intermediate[],
+	// and print the result to mr-out-0.
+	//
+	i := 0
+	for i < len(intermediate) {
+		j := i + 1
+		for j < len(intermediate) && intermediate[j].Key == intermediate[i].Key {
+			j++
+		}
+		values := []string{}
+		for k := i; k < j; k++ {
+			values = append(values, intermediate[k].Value)
+		}
+		output := reducef(intermediate[i].Key, values)
+
+		// this is the correct format for each line of Reduce output.
+		fmt.Fprintf(ofile, "%v %v\n", intermediate[i].Key, output)
+
+		i = j
+	}
+
+	ofile.Close()
+
+	return nil
 }
 
 // example function to show how to make an RPC call to the coordinator.
